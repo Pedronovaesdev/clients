@@ -1,0 +1,241 @@
+# Mede o tempo dos testes Jest do Bitwarden com e sem o test-graph-selector,
+# nos 15 commits mais recentes de main (22/10/2026).
+#
+# Para cada commit:
+#   - completa:  os 5 grupos do CI do Bitwarden (mesmo comando e flags do test.yml)
+#   - seletiva:  a ferramenta escolhe os testes uma vez (job "selecao") e cada
+#                grupo roda so os escolhidos que caem nele
+# O grafo vem de um cache montado antes (job "aquecimento"), como num CI em uso.
+# Tempos medidos so nos passos de teste e de selecao; o npm ci e igual nos dois.
+name: Medir selecao de testes
+
+on:
+  push:
+    branches: [medicao]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TGS_REF: deddd1b4f94a80423152dd36d8c14048a4d28e7d
+  GRAPHIFY_VERSION: "0.9.90"
+  BASE_GRAFO: 2d27c2b05f3fae7226cdaaf301c5dae50c4103f3
+  JEST_FLAGS: --coverage --maxWorkers=2 --workerIdleMemoryLimit=1500MiB
+
+jobs:
+  aquecimento:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BASE_GRAFO }}
+          persist-credentials: false
+      - name: Ferramenta
+        run: |
+          git clone --quiet https://github.com/Pedronovaesdev/test-graph.git "$RUNNER_TEMP/tgs"
+          git -C "$RUNNER_TEMP/tgs" checkout --quiet "$TGS_REF"
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet "graphifyy==$GRAPHIFY_VERSION"
+      - name: Grafo inicial
+        run: |
+          start=$(date +%s)
+          PYTHONHASHSEED=0 "$RUNNER_TEMP/venv/bin/python" "$RUNNER_TEMP/tgs/selector/bin/graphify-fast.py" extract . --no-cluster --code-only
+          echo "### Grafo inicial: $(( $(date +%s) - start )) s" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/cache/save@v4
+        with:
+          path: graphify-out
+          key: bw-grafo-${{ github.run_id }}
+
+  selecao:
+    needs: aquecimento
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        commit:
+          - 49a6fabee4ef7f02e782f138a0d8e9bafb05aae6
+          - 1e4eef19bd697abdc2767a180457fe4420303d55
+          - 40a5d481f132845c8b57dc00a25064c728647280
+          - 0ad8f11a67a89192c0c383dc7c291c6c142ed5e7
+          - 9904c0a19306c94d89c726564860bbd11cf56fd2
+          - 16a22195c5fb433ecca36acff1b8df9b79cc55f5
+          - 18d6d9f10c32ee8b76ee60355afcbd53ab2677a6
+          - 2e473d713394daca52d7a54288983c5730c78c6f
+          - 5b775536fde3db0f1e115acb1863ee32d5a3a2fb
+          - 44b120f6678671b03df5fd82f46611720c5f558e
+          - 589d8b50ef62b632e207c5ea87eec22b8d63aaed
+          - 9a03963fa07cf881f38028c7c282511b76d5481e
+          - 162fc00f96fbb05318fc9db92e1a04803a0923cd
+          - ea6c9e20bc262105dfff0b70002dd3cc72c29e21
+          - 98b19b848b70b83ca7a53d78971467cd3de9e041
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.commit }}
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - uses: actions/cache/restore@v4
+        with:
+          path: graphify-out
+          key: bw-grafo-${{ github.run_id }}
+      - name: Instalar a ferramenta
+        run: |
+          git clone --quiet https://github.com/Pedronovaesdev/test-graph.git "$RUNNER_TEMP/tgs"
+          git -C "$RUNNER_TEMP/tgs" checkout --quiet "$TGS_REF"
+          (cd "$RUNNER_TEMP/tgs/selector" && npm ci --silent --no-audit --no-fund && npm run build --silent)
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet "graphifyy==$GRAPHIFY_VERSION"
+      - name: Selecao
+        env:
+          GRAPHIFY: ${{ runner.temp }}/venv/bin/graphify
+        run: |
+          start=$(date +%s)
+          set +e
+          bash "$RUNNER_TEMP/tgs/selector/bin/select-tests.sh" --project . --lang angular \
+            --base "${{ matrix.commit }}~1" --head HEAD --dry-run
+          set -e
+          t=$(( $(date +%s) - start ))
+          mkdir -p sel
+          cp .selector-out/selected-tests.txt sel/ 2>/dev/null || touch sel/selected-tests.txt
+          cp .selector-out/report.md sel/ 2>/dev/null || true
+          mode=$(cat .selector-out/mode.txt 2>/dev/null || echo full)
+          echo "$mode" > sel/mode.txt
+          echo "$t" > sel/t_selecao.txt
+          echo "### ${{ matrix.commit }}: $mode, $(grep -c . sel/selected-tests.txt) testes, ${t} s" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: sel-${{ matrix.commit }}
+          path: sel/
+
+  testes:
+    needs: selecao
+    runs-on: ubuntu-22.04
+    strategy:
+      fail-fast: false
+      matrix:
+        commit:
+          - 49a6fabee4ef7f02e782f138a0d8e9bafb05aae6
+          - 1e4eef19bd697abdc2767a180457fe4420303d55
+          - 40a5d481f132845c8b57dc00a25064c728647280
+          - 0ad8f11a67a89192c0c383dc7c291c6c142ed5e7
+          - 9904c0a19306c94d89c726564860bbd11cf56fd2
+          - 16a22195c5fb433ecca36acff1b8df9b79cc55f5
+          - 18d6d9f10c32ee8b76ee60355afcbd53ab2677a6
+          - 2e473d713394daca52d7a54288983c5730c78c6f
+          - 5b775536fde3db0f1e115acb1863ee32d5a3a2fb
+          - 44b120f6678671b03df5fd82f46611720c5f558e
+          - 589d8b50ef62b632e207c5ea87eec22b8d63aaed
+          - 9a03963fa07cf881f38028c7c282511b76d5481e
+          - 162fc00f96fbb05318fc9db92e1a04803a0923cd
+          - ea6c9e20bc262105dfff0b70002dd3cc72c29e21
+          - 98b19b848b70b83ca7a53d78971467cd3de9e041
+        grupo:
+          - { name: Browser, paths: "apps/browser bitwarden_license/bit-browser" }
+          - { name: Web, paths: "apps/web bitwarden_license/bit-web" }
+          - { name: Desktop, paths: "apps/desktop bitwarden_license/bit-desktop" }
+          - { name: CLI, paths: "apps/cli bitwarden_license/bit-cli" }
+          - { name: Libs, paths: "libs bitwarden_license/bit-common" }
+    name: testes (${{ matrix.grupo.name }}, ${{ matrix.commit }})
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ matrix.commit }}
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: "**/package-lock.json"
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: sel-${{ matrix.commit }}
+          path: sel
+      - name: Suite completa do grupo
+        # sem cache do Jest, para a seletiva nao herdar a compilacao da completa
+        run: |
+          npx jest --clearCache
+          start=$(date +%s)
+          set +e
+          npm test -- ${{ matrix.grupo.paths }} $JEST_FLAGS
+          rc=$?
+          set -e
+          echo "$(( $(date +%s) - start )) $rc" > t_completa.txt
+          rm -rf coverage
+      - name: Testes escolhidos do grupo
+        run: |
+          npx jest --clearCache
+          pattern="^($(echo "${{ matrix.grupo.paths }}" | sed 's/ /|/g'))/"
+          mode=$(cat sel/mode.txt)
+          grep -E "$pattern" sel/selected-tests.txt > grupo.txt || true
+          n=$(grep -c . grupo.txt || true)
+          start=$(date +%s)
+          set +e
+          rc=0
+          if [ "$mode" = "full" ]; then
+            n=all
+            npm test -- ${{ matrix.grupo.paths }} $JEST_FLAGS; rc=$?
+          elif [ "$n" -gt 0 ]; then
+            xargs -a grupo.txt npx jest $JEST_FLAGS --runTestsByPath; rc=$?
+          fi
+          set -e
+          echo "$(( $(date +%s) - start )) $rc $n" > t_seletiva.txt
+      - name: Registrar
+        run: |
+          read tc rcc < t_completa.txt
+          read ts rcs ns < t_seletiva.txt
+          mkdir -p res
+          printf '{"commit":"%s","grupo":"%s","modo":"%s","t_completa":%s,"rc_completa":%s,"t_seletiva":%s,"rc_seletiva":%s,"testes":"%s","t_selecao":%s}\n' \
+            "${{ matrix.commit }}" "${{ matrix.grupo.name }}" "$(cat sel/mode.txt)" "$tc" "$rcc" "$ts" "$rcs" "$ns" "$(cat sel/t_selecao.txt)" \
+            > "res/${{ matrix.commit }}-${{ matrix.grupo.name }}.json"
+          cat res/*.json
+      - uses: actions/upload-artifact@v4
+        with:
+          name: res-${{ matrix.commit }}-${{ matrix.grupo.name }}
+          path: res/
+
+  resumo:
+    needs: testes
+    if: always()
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: res-*
+          path: res
+          merge-multiple: true
+      - name: Tabela
+        run: |
+          node - <<'EOF' | tee resultado.md >> "$GITHUB_STEP_SUMMARY"
+          const fs = require("fs");
+          const rows = fs.readdirSync("res").map((f) => JSON.parse(fs.readFileSync("res/" + f, "utf8")));
+          const by = new Map();
+          for (const r of rows) { if (!by.has(r.commit)) by.set(r.commit, []); by.get(r.commit).push(r); }
+          const fmt = (s) => `${Math.floor(s / 60)}m${String(s % 60).padStart(2, "0")}s`;
+          let T = { cw: 0, sw: 0, cm: 0, sm: 0 };
+          console.log("# Bitwarden: testes Jest com e sem test-graph-selector\n");
+          console.log("Parede = o grupo mais lento (como o CI roda os 5 em paralelo). Máquina = soma dos 5 grupos. A seleção roda uma vez por commit e entra nos dois tempos da seletiva.\n");
+          console.log("| Commit | Modo | Completa (parede) | Seletiva (parede) | Completa (máquina) | Seletiva (máquina) | Falhas completa/seletiva |");
+          console.log("|---|---|---|---|---|---|---|");
+          for (const [c, rs] of by) {
+            const sel = rs[0].t_selecao;
+            const cw = Math.max(...rs.map((r) => r.t_completa));
+            const sw = sel + Math.max(...rs.map((r) => r.t_seletiva));
+            const cm = rs.reduce((a, r) => a + r.t_completa, 0);
+            const sm = sel + rs.reduce((a, r) => a + r.t_seletiva, 0);
+            const fc = rs.filter((r) => r.rc_completa !== 0).map((r) => r.grupo).join(",") || "-";
+            const fs2 = rs.filter((r) => r.rc_seletiva !== 0).map((r) => r.grupo).join(",") || "-";
+            T.cw += cw; T.sw += sw; T.cm += cm; T.sm += sm;
+            console.log(`| ${c.slice(0, 10)} | ${rs[0].modo} | ${fmt(cw)} | ${fmt(sw)} | ${fmt(cm)} | ${fmt(sm)} | ${fc} / ${fs2} |`);
+          }
+          const pct = (a, b) => `${Math.round(100 - (100 * b) / a)}%`;
+          console.log(`| **Total** | | **${fmt(T.cw)}** | **${fmt(T.sw)}** (−${pct(T.cw, T.sw)}) | **${fmt(T.cm)}** | **${fmt(T.sm)}** (−${pct(T.cm, T.sm)}) | |`);
+          EOF
+      - uses: actions/upload-artifact@v4
+        with:
+          name: resultado
+          path: resultado.md
