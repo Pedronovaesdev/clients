@@ -24,9 +24,9 @@ cache_files=$(find graphify-out/cache -type f 2>/dev/null | wc -l)
 sha=$(sha256sum "$G" 2>/dev/null | cut -c1-16)
 
 jq -nc \
-  --arg label "$LABEL" --arg commit "$(git rev-parse --short=10 HEAD)" --arg sha "$sha" \
+  --arg nome "$LABEL" --arg commit "$(git rev-parse --short=10 HEAD)" --arg sha "$sha" \
   --argjson s "$secs" --argjson rc "$rc" --argjson nodes "$nodes" --argjson edges "$edges" \
   --argjson graph_mb "$graph_mb" --argjson cache_mb "$cache_mb" --argjson cache_files "$cache_files" \
   --argjson cpus "$(nproc)" \
-  '{cenario:$label,commit:$commit,segundos:$s,rc:$rc,sha:$sha,nos:$nodes,arestas:$edges,grafo_mb:$graph_mb,cache_mb:$cache_mb,cache_arquivos:$cache_files,cpus:$cpus}' \
+  '{cenario:$nome,commit:$commit,segundos:$s,rc:$rc,sha:$sha,nos:$nodes,arestas:$edges,grafo_mb:$graph_mb,cache_mb:$cache_mb,cache_arquivos:$cache_files,cpus:$cpus}' \
   | tee -a res/grafo.jsonl
