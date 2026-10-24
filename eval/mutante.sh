@@ -37,7 +37,7 @@ write() { # veredito, detalhe(json), etapa1(s), etapa2(s)
 
 # --- selecao (a ferramenta de verdade, com o cache do grafo restaurado) -------
 start=$(date +%s)
-bash "$TGS/selector/bin/select-tests.sh" --project . --lang angular \
+GITHUB_STEP_SUMMARY=/dev/null bash "$TGS/selector/bin/select-tests.sh" --project . --lang angular \
   --base HEAD~1 --head HEAD --dry-run > work/select.log 2>&1 || true
 T_SEL=$(( $(date +%s) - start ))
 MODE="$(cat .selector-out/mode.txt 2>/dev/null || echo fail-safe)"

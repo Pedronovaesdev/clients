@@ -4,7 +4,7 @@
 #   cache_do_base           cache de um commit antigo aplicado a um commit mais novo
 #   sequencia               15 commits seguidos no mesmo cache (o cache acumulado atrapalha?)
 #
-# push na branch = teste rapido (1 repeticao, 3 commits). Disparo manual = completo.
+# push na branch = analise completa (3 repeticoes, 15 commits). Disparo manual = completo.
 name: Medir grafo
 
 on:
@@ -27,8 +27,8 @@ env:
   GRAPHIFY_VERSION: "0.9.90"
   BASE_GRAFO: 2d27c2b05f3fae7226cdaaf301c5dae50c4103f3
   HEAD_GRAFO: 49a6fabee4ef7f02e782f138a0d8e9bafb05aae6
-  REP: ${{ github.event_name == 'workflow_dispatch' && inputs.repeticoes || '1' }}
-  N_SEQ: ${{ github.event_name == 'workflow_dispatch' && inputs.commits || '3' }}
+  REP: ${{ github.event_name == 'workflow_dispatch' && inputs.repeticoes || '3' }}
+  N_SEQ: ${{ github.event_name == 'workflow_dispatch' && inputs.commits || '15' }}
 
 jobs:
   frio_base:
@@ -253,7 +253,7 @@ jobs:
           pattern: grafo-*
           path: res
       - name: Tabela
-        run: node eval/resumo-grafo.mjs res | tee resultado-grafo.md >> "$GITHUB_STEP_SUMMARY"
+        run: node eval/resumo-grafo.mjs res | tee -a resultado-grafo.md "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: resultado-grafo

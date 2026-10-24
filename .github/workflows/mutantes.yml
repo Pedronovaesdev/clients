@@ -11,7 +11,7 @@
 #    Toda falha e conferida sem o mutante, para descartar testes instaveis.
 # 3. "resumo" junta tudo, com intervalo de confianca.
 #
-# push na branch = teste rapido (3 mutantes). Disparo manual = analise completa.
+# push na branch = analise completa (60 mutantes). Disparo manual = analise completa.
 name: Mutantes
 
 on:
@@ -32,7 +32,7 @@ permissions:
 env:
   TGS_REF: d820f08b44b26dd9bb3acdaad2fb1b7a81930fec
   GRAPHIFY_VERSION: "0.9.90"
-  N_MUTANTES: ${{ github.event_name == 'workflow_dispatch' && inputs.mutantes || '3' }}
+  N_MUTANTES: ${{ github.event_name == 'workflow_dispatch' && inputs.mutantes || '60' }}
   SEED: ${{ github.event_name == 'workflow_dispatch' && inputs.seed || '1' }}
 
 jobs:
@@ -115,7 +115,7 @@ jobs:
           {
             echo "### ${{ matrix.id }}"
             jq -r '"**\(.veredito)**: \(.arquivo):\(.linha) `\(.de)` → `\(.para)`, \(.selecionados) testes selecionados (\(.modo))"' res/${{ matrix.id }}.json 2>/dev/null || echo "sem resultado"
-          } >> "$GITHUB_STEP_SUMMARY"
+          } | tee -a "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -146,7 +146,7 @@ jobs:
           path: res
           merge-multiple: true
       - name: Tabela
-        run: node eval/resumo-mutantes.mjs res | tee resultado-mutantes.md >> "$GITHUB_STEP_SUMMARY"
+        run: node eval/resumo-mutantes.mjs res | tee -a resultado-mutantes.md "$GITHUB_STEP_SUMMARY"
       - uses: actions/upload-artifact@v4
         with:
           name: resultado-mutantes
