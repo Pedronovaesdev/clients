@@ -1,0 +1,260 @@
+# Mede o tempo de construcao do grafo (graphify) no CI, em cinco situacoes:
+#   frio_base / frio_head   sem cache nenhum
+#   quente_head             cache restaurado + checkout novo (o caso real de um PR)
+#   cache_do_base           cache de um commit antigo aplicado a um commit mais novo
+#   sequencia               15 commits seguidos no mesmo cache (o cache acumulado atrapalha?)
+#
+# push na branch = teste rapido (1 repeticao, 3 commits). Disparo manual = completo.
+name: Medir grafo
+
+on:
+  push:
+    branches: [medicao-mutantes]
+  workflow_dispatch:
+    inputs:
+      repeticoes:
+        description: "repeticoes de cada medicao"
+        default: "3"
+      commits:
+        description: "commits seguidos na sequencia (1 a 15)"
+        default: "15"
+
+permissions:
+  contents: read
+
+env:
+  TGS_REF: d820f08b44b26dd9bb3acdaad2fb1b7a81930fec
+  GRAPHIFY_VERSION: "0.9.90"
+  BASE_GRAFO: 2d27c2b05f3fae7226cdaaf301c5dae50c4103f3
+  HEAD_GRAFO: 49a6fabee4ef7f02e782f138a0d8e9bafb05aae6
+  REP: ${{ github.event_name == 'workflow_dispatch' && inputs.repeticoes || '1' }}
+  N_SEQ: ${{ github.event_name == 'workflow_dispatch' && inputs.commits || '3' }}
+
+jobs:
+  frio_base:
+    runs-on: ubuntu-22.04
+    steps:
+      # os scripts vem desta branch; o codigo medido vem do commit pedido
+      - uses: actions/checkout@v4
+        with:
+          path: _ev
+          sparse-checkout: eval
+          persist-credentials: false
+      - name: Ferramenta
+        run: |
+          mv _ev "$RUNNER_TEMP/ev"
+          echo "EVAL=$RUNNER_TEMP/ev/eval" >> "$GITHUB_ENV"
+          git clone --quiet https://github.com/Pedronovaesdev/test-graph.git "$RUNNER_TEMP/tgs"
+          git -C "$RUNNER_TEMP/tgs" checkout --quiet "$TGS_REF"
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet "graphifyy==$GRAPHIFY_VERSION"
+          echo "TGS=$RUNNER_TEMP/tgs" >> "$GITHUB_ENV"
+          echo "VENV=$RUNNER_TEMP/venv" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.BASE_GRAFO }}
+          persist-credentials: false
+      - name: Cache frio (commit base)
+        run: |
+          for i in $(seq 1 "$REP"); do
+            rm -rf graphify-out
+            bash "$EVAL/grafo.sh" "frio_base_$i"
+          done
+      - uses: actions/cache/save@v4
+        with:
+          path: graphify-out
+          key: grafo-base-${{ github.run_id }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: grafo-frio_base
+          path: res/grafo.jsonl
+
+  frio_head:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: _ev
+          sparse-checkout: eval
+          persist-credentials: false
+      - name: Ferramenta
+        run: |
+          mv _ev "$RUNNER_TEMP/ev"
+          echo "EVAL=$RUNNER_TEMP/ev/eval" >> "$GITHUB_ENV"
+          git clone --quiet https://github.com/Pedronovaesdev/test-graph.git "$RUNNER_TEMP/tgs"
+          git -C "$RUNNER_TEMP/tgs" checkout --quiet "$TGS_REF"
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet "graphifyy==$GRAPHIFY_VERSION"
+          echo "TGS=$RUNNER_TEMP/tgs" >> "$GITHUB_ENV"
+          echo "VENV=$RUNNER_TEMP/venv" >> "$GITHUB_ENV"
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.HEAD_GRAFO }}
+          persist-credentials: false
+      - name: Cache frio (commit analisado)
+        run: |
+          for i in $(seq 1 "$REP"); do
+            rm -rf graphify-out
+            bash "$EVAL/grafo.sh" "frio_head_$i"
+          done
+      - uses: actions/cache/save@v4
+        with:
+          path: graphify-out
+          key: grafo-head-${{ github.run_id }}
+      - uses: actions/upload-artifact@v4
+        with:
+          name: grafo-frio_head
+          path: res/grafo.jsonl
+
+  quente_head:
+    needs: frio_head
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: _ev
+          sparse-checkout: eval
+          persist-credentials: false
+      - name: Ferramenta
+        run: |
+          mv _ev "$RUNNER_TEMP/ev"
+          echo "EVAL=$RUNNER_TEMP/ev/eval" >> "$GITHUB_ENV"
+          git clone --quiet https://github.com/Pedronovaesdev/test-graph.git "$RUNNER_TEMP/tgs"
+          git -C "$RUNNER_TEMP/tgs" checkout --quiet "$TGS_REF"
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet "graphifyy==$GRAPHIFY_VERSION"
+          echo "TGS=$RUNNER_TEMP/tgs" >> "$GITHUB_ENV"
+          echo "VENV=$RUNNER_TEMP/venv" >> "$GITHUB_ENV"
+      # checkout novo: arquivos com data de modificacao nova, como num PR de verdade
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.HEAD_GRAFO }}
+          persist-credentials: false
+      - uses: actions/cache/restore@v4
+        with:
+          path: graphify-out
+          key: grafo-head-${{ github.run_id }}
+      - name: Cache quente
+        run: |
+          cp -a graphify-out "$RUNNER_TEMP/cache0"
+          # 1) checkout novo + cache restaurado; nas repeticoes, o cache original e
+          #    recolocado e as datas dos arquivos sao renovadas
+          for i in $(seq 1 "$REP"); do
+            if [ "$i" -gt 1 ]; then
+              rm -rf graphify-out; cp -a "$RUNNER_TEMP/cache0" graphify-out
+              find . -type f -not -path './.git/*' -not -path './graphify-out/*' -not -path './res/*' -exec touch {} +
+            fi
+            bash "$EVAL/grafo.sh" "quente_checkout_novo_$i"
+          done
+          # 2) mesma arvore, mesmas datas, cache ja atualizado pela execucao anterior
+          for i in $(seq 1 "$REP"); do
+            bash "$EVAL/grafo.sh" "quente_mesma_arvore_$i"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: grafo-quente_head
+          path: res/grafo.jsonl
+
+  cache_do_base:
+    needs: frio_base
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          path: _ev
+          sparse-checkout: eval
+          persist-credentials: false
+      - name: Ferramenta
+        run: |
+          mv _ev "$RUNNER_TEMP/ev"
+          echo "EVAL=$RUNNER_TEMP/ev/eval" >> "$GITHUB_ENV"
+          git clone --quiet https://github.com/Pedronovaesdev/test-graph.git "$RUNNER_TEMP/tgs"
+          git -C "$RUNNER_TEMP/tgs" checkout --quiet "$TGS_REF"
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet "graphifyy==$GRAPHIFY_VERSION"
+          echo "TGS=$RUNNER_TEMP/tgs" >> "$GITHUB_ENV"
+          echo "VENV=$RUNNER_TEMP/venv" >> "$GITHUB_ENV"
+      # situacao de um PR: o cache veio de um commit 15 commits mais antigo
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.HEAD_GRAFO }}
+          persist-credentials: false
+      - uses: actions/cache/restore@v4
+        with:
+          path: graphify-out
+          key: grafo-base-${{ github.run_id }}
+      - name: Cache de outro commit
+        run: |
+          bash "$EVAL/grafo.sh" cache_do_base_no_head_1
+          bash "$EVAL/grafo.sh" cache_do_base_no_head_2
+      - uses: actions/upload-artifact@v4
+        with:
+          name: grafo-cache_do_base
+          path: res/grafo.jsonl
+
+  sequencia:
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Ferramenta
+        run: |
+          cp -r eval "$RUNNER_TEMP/eval"
+          echo "EVAL=$RUNNER_TEMP/eval" >> "$GITHUB_ENV"
+          git clone --quiet https://github.com/Pedronovaesdev/test-graph.git "$RUNNER_TEMP/tgs"
+          git -C "$RUNNER_TEMP/tgs" checkout --quiet "$TGS_REF"
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet "graphifyy==$GRAPHIFY_VERSION"
+          echo "TGS=$RUNNER_TEMP/tgs" >> "$GITHUB_ENV"
+          echo "VENV=$RUNNER_TEMP/venv" >> "$GITHUB_ENV"
+      - name: Commits seguidos no mesmo cache
+        run: |
+          # do mais antigo para o mais novo; o primeiro e frio
+          commits=(
+            "$BASE_GRAFO"
+            98b19b848b70b83ca7a53d78971467cd3de9e041
+            ea6c9e20bc262105dfff0b70002dd3cc72c29e21
+            162fc00f96fbb05318fc9db92e1a04803a0923cd
+            9a03963fa07cf881f38028c7c282511b76d5481e
+            589d8b50ef62b632e207c5ea87eec22b8d63aaed
+            44b120f6678671b03df5fd82f46611720c5f558e
+            5b775536fde3db0f1e115acb1863ee32d5a3a2fb
+            2e473d713394daca52d7a54288983c5730c78c6f
+            18d6d9f10c32ee8b76ee60355afcbd53ab2677a6
+            16a22195c5fb433ecca36acff1b8df9b79cc55f5
+            9904c0a19306c94d89c726564860bbd11cf56fd2
+            0ad8f11a67a89192c0c383dc7c291c6c142ed5e7
+            40a5d481f132845c8b57dc00a25064c728647280
+            1e4eef19bd697abdc2767a180457fe4420303d55
+            49a6fabee4ef7f02e782f138a0d8e9bafb05aae6
+          )
+          rm -rf graphify-out
+          for i in $(seq 0 "$N_SEQ"); do
+            git checkout --quiet "${commits[$i]}"
+            bash "$EVAL/grafo.sh" "$(printf 'seq_%02d' "$i")"
+          done
+      - uses: actions/upload-artifact@v4
+        with:
+          name: grafo-sequencia
+          path: res/grafo.jsonl
+
+  resumo:
+    needs: [frio_base, frio_head, quente_head, cache_do_base, sequencia]
+    if: always()
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: grafo-*
+          path: res
+      - name: Tabela
+        run: node eval/resumo-grafo.mjs res | tee resultado-grafo.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: resultado-grafo
+          path: resultado-grafo.md

@@ -1,0 +1,153 @@
+# Analise de mutantes: a selecao de testes do test-graph-selector deixa bugs passarem?
+#
+# 1. "gerar" sorteia N mutantes (alteracoes pequenas em arquivos de producao) e
+#    monta o grafo uma vez (cache).
+# 2. "mutante" (um job por mutante): aplica o bug, roda a ferramenta de verdade
+#    (select-tests.sh --dry-run) e executa o Jest:
+#      etapa 1: so os testes selecionados. Se algum falha, o bug foi pego.
+#      etapa 2: so se a etapa 1 passou, o resto da suite. Se algum teste fora da
+#               selecao falha, e um ESCAPE; se nenhum falha, a suite nao detecta o
+#               mutante e a selecao nao tem culpa.
+#    Toda falha e conferida sem o mutante, para descartar testes instaveis.
+# 3. "resumo" junta tudo, com intervalo de confianca.
+#
+# push na branch = teste rapido (3 mutantes). Disparo manual = analise completa.
+name: Mutantes
+
+on:
+  push:
+    branches: [medicao-mutantes]
+  workflow_dispatch:
+    inputs:
+      mutantes:
+        description: "numero de mutantes"
+        default: "60"
+      seed:
+        description: "semente do sorteio (a mesma semente gera os mesmos mutantes)"
+        default: "1"
+
+permissions:
+  contents: read
+
+env:
+  TGS_REF: d820f08b44b26dd9bb3acdaad2fb1b7a81930fec
+  GRAPHIFY_VERSION: "0.9.90"
+  N_MUTANTES: ${{ github.event_name == 'workflow_dispatch' && inputs.mutantes || '3' }}
+  SEED: ${{ github.event_name == 'workflow_dispatch' && inputs.seed || '1' }}
+
+jobs:
+  gerar:
+    runs-on: ubuntu-22.04
+    outputs:
+      ids: ${{ steps.ids.outputs.ids }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - name: Sortear mutantes
+        id: ids
+        run: |
+          npm install --prefix "$RUNNER_TEMP/ts" --silent --no-audit --no-fund typescript@5.6.3
+          TS_FROM="$RUNNER_TEMP/ts" node eval/mutate.mjs gen "$SEED" "$N_MUTANTES" eval/mutants.json
+          echo "ids=$(jq -c '[.[].id]' eval/mutants.json)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: mutantes
+          path: eval/mutants.json
+      - name: Ferramenta
+        run: |
+          git clone --quiet https://github.com/Pedronovaesdev/test-graph.git "$RUNNER_TEMP/tgs"
+          git -C "$RUNNER_TEMP/tgs" checkout --quiet "$TGS_REF"
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet "graphifyy==$GRAPHIFY_VERSION"
+      - name: Grafo inicial (cache dos jobs de mutante)
+        run: |
+          start=$(date +%s)
+          PYTHONHASHSEED=0 "$RUNNER_TEMP/venv/bin/python" "$RUNNER_TEMP/tgs/selector/bin/graphify-fast.py" extract . --no-cluster --code-only
+          echo "### Grafo inicial: $(( $(date +%s) - start )) s" >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/cache/save@v4
+        with:
+          path: graphify-out
+          key: mut-grafo-${{ github.run_id }}
+
+  mutante:
+    needs: gerar
+    runs-on: ubuntu-22.04
+    timeout-minutes: 240
+    strategy:
+      fail-fast: false
+      max-parallel: 15
+      matrix:
+        id: ${{ fromJSON(needs.gerar.outputs.ids) }}
+    name: mutante ${{ matrix.id }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+          cache: npm
+          cache-dependency-path: "**/package-lock.json"
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: mutantes
+          path: eval
+      - uses: actions/cache/restore@v4
+        with:
+          path: graphify-out
+          key: mut-grafo-${{ github.run_id }}
+      - name: Instalar a ferramenta
+        run: |
+          git clone --quiet https://github.com/Pedronovaesdev/test-graph.git "$RUNNER_TEMP/tgs"
+          git -C "$RUNNER_TEMP/tgs" checkout --quiet "$TGS_REF"
+          (cd "$RUNNER_TEMP/tgs/selector" && npm ci --silent --no-audit --no-fund && npm run build --silent)
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet "graphifyy==$GRAPHIFY_VERSION"
+          echo "TGS=$RUNNER_TEMP/tgs" >> "$GITHUB_ENV"
+          echo "GRAPHIFY=$RUNNER_TEMP/venv/bin/graphify" >> "$GITHUB_ENV"
+      - name: Avaliar o mutante
+        run: bash eval/mutante.sh "${{ matrix.id }}"
+      - name: Resumo do mutante
+        if: always()
+        run: |
+          {
+            echo "### ${{ matrix.id }}"
+            jq -r '"**\(.veredito)**: \(.arquivo):\(.linha) `\(.de)` → `\(.para)`, \(.selecionados) testes selecionados (\(.modo))"' res/${{ matrix.id }}.json 2>/dev/null || echo "sem resultado"
+          } >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: res-${{ matrix.id }}
+          path: res/*.json
+          if-no-files-found: ignore
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: log-${{ matrix.id }}
+          path: |
+            work/select.log
+            work/report.md
+            work/jest.log
+          if-no-files-found: ignore
+
+  resumo:
+    needs: mutante
+    if: always()
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: res-*
+          path: res
+          merge-multiple: true
+      - name: Tabela
+        run: node eval/resumo-mutantes.mjs res | tee resultado-mutantes.md >> "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: resultado-mutantes
+          path: resultado-mutantes.md
