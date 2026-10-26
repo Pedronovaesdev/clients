@@ -1,0 +1,77 @@
+# Compara a selecao do seletor antigo (tsc, d820f08) com a do bundle esbuild (v1.1.0)
+# nos mesmos 60 mutantes (semente 1). So seleciona; nao roda Jest.
+name: Comparar bundle
+
+on:
+  push:
+    branches: [comparar-bundle]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+env:
+  TGS_OLD_REF: d820f08b44b26dd9bb3acdaad2fb1b7a81930fec
+  TGS_NEW_REF: 45698b99560eb2f9ea208b1de43695816bb85606
+  GRAPHIFY_VERSION: "0.9.90"
+
+jobs:
+  comparar:
+    runs-on: ubuntu-22.04
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [0, 1, 2, 3]
+    name: shard ${{ matrix.shard }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: .nvmrc
+      - name: Ferramentas
+        run: |
+          npm install --prefix "$RUNNER_TEMP/ts" --silent --no-audit --no-fund typescript@5.6.3
+          echo "TS_FROM=$RUNNER_TEMP/ts" >> "$GITHUB_ENV"
+          git clone --quiet https://github.com/Pedronovaesdev/test-graph.git "$RUNNER_TEMP/old"
+          git -C "$RUNNER_TEMP/old" checkout --quiet "$TGS_OLD_REF"
+          (cd "$RUNNER_TEMP/old/selector" && npm ci --silent --no-audit --no-fund && npm run build --silent)
+          git clone --quiet https://github.com/Pedronovaesdev/test-graph.git "$RUNNER_TEMP/new"
+          git -C "$RUNNER_TEMP/new" checkout --quiet "$TGS_NEW_REF"
+          test -f "$RUNNER_TEMP/new/selector/dist/cli.js"
+          python3 -m venv "$RUNNER_TEMP/venv"
+          "$RUNNER_TEMP/venv/bin/pip" install --quiet "graphifyy==$GRAPHIFY_VERSION"
+          echo "TGS_OLD=$RUNNER_TEMP/old" >> "$GITHUB_ENV"
+          echo "TGS_NEW=$RUNNER_TEMP/new" >> "$GITHUB_ENV"
+          echo "GRAPHIFY=$RUNNER_TEMP/venv/bin/graphify" >> "$GITHUB_ENV"
+      - name: Sortear os mesmos mutantes
+        run: TS_FROM="$TS_FROM" node eval/mutate.mjs gen 1 60 eval/mutants.json
+      - name: Comparar
+        run: bash eval/comparar.sh ${{ matrix.shard }} 4
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: cmp-${{ matrix.shard }}
+          path: res/cmp-*.json
+
+  resumo:
+    needs: comparar
+    if: always()
+    runs-on: ubuntu-22.04
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@v4
+        with:
+          pattern: cmp-*
+          path: res
+          merge-multiple: true
+      - name: Tabela
+        run: node eval/resumo-comparar.mjs res | tee -a resultado-comparar.md "$GITHUB_STEP_SUMMARY"
+      - uses: actions/upload-artifact@v4
+        with:
+          name: resultado-comparar
+          path: resultado-comparar.md
